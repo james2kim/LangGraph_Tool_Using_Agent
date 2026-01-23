@@ -1,0 +1,23 @@
+# dependencies
+/node_modules
+
+# env files
+.env*
+
+# logs
+/logs
+
+# practice drills (learning exercises)
+src/practice-drill-*.ts
+
+# misc
+.DS_Store
+*.pem
+npm-debug.log*
+
+# typescript
+*.tsbuildinfo
+
+# IDE
+.vscode/
+.idea/
