@@ -1,9 +1,13 @@
 import dotenv from 'dotenv';
+import { StateGraph, START, END, Annotation, MessagesAnnotation } from '@langchain/langgraph';
+import { tool } from 'langchain';
 dotenv.config({ path: '.env.local' });
 import { z } from 'zod/v4';
-import Anthropic from '@anthropic-ai/sdk';
+import { ChatAnthropic } from '@langchain/anthropic';
+import { ToolMessage, HumanMessage } from '@langchain/core/messages';
 
-const anthropic = new Anthropic({
+const model = new ChatAnthropic({
+  model: 'claude-sonnet-4-5-20250929',
   apiKey: process.env.ANTHROPIC_API_KEY,
 });
 
@@ -95,38 +99,291 @@ const TOOL_INPUT_SCHEMAS = {
 
 type DBQueryInput = z.infer<typeof dbQueryInputSchema>;
 
-const calculatorTool: Anthropic.Tool = {
-  name: 'calculator',
-  description:
-    'Use this tool when an exact numerical calculation is required and precision matters.',
-  input_schema: z.toJSONSchema(CalculatorInputSchema) as Anthropic.Tool.InputSchema,
-};
+const calculatorTool = tool(
+  (calcInput: CalculatorInput) => {
+    let result: number;
 
-const webFetchTool: Anthropic.Tool = {
-  name: 'web_fetch_mock',
-  description:
-    'Use this tool when we need to fetch the external page content or meta data of a website',
-  input_schema: z.toJSONSchema(WebFetchInputSchema) as Anthropic.Tool.InputSchema,
-};
+    try {
+      switch (calcInput.operation) {
+        case 'multiply':
+          result = calcInput.a * calcInput.b;
+          break;
+        case 'add':
+          result = calcInput.a + calcInput.b;
+          break;
+        case 'subtract':
+          result = calcInput.a - calcInput.b;
+          break;
+        case 'divide':
+          result = calcInput.a / calcInput.b;
+          break;
+        default:
+          throw new Error('Unsupported operation');
+      }
 
-const dbQueryCandidatesTool: Anthropic.Tool = {
-  name: 'db_query_candidates',
-  description: 'Query the candidates table by name, email, id, or address',
-  input_schema: z.toJSONSchema(CandidatesInputQuerySchema) as Anthropic.Tool.InputSchema,
-};
+      if (!Number.isFinite(result)) {
+        const { error_type, error_message } = classifyCalculatorError(calcInput, result);
 
-const dbQueryOpportunitiesTool: Anthropic.Tool = {
-  name: 'db_query_opportunities',
-  description: 'Query the opportunities table by name, position, id, or stage',
-  input_schema: z.toJSONSchema(OpportunitiesInputQuerySchema) as Anthropic.Tool.InputSchema,
-};
+        return CalculatorFailureSchema.parse({
+          success: false,
+          ...calcInput,
+          error_type,
+          error_message,
+        });
+      }
 
-const tools: Anthropic.Tool[] = [
-  calculatorTool,
-  webFetchTool,
-  dbQueryCandidatesTool,
-  dbQueryOpportunitiesTool,
-];
+      return CalculatorSuccessSchema.parse({
+        success: true,
+        result,
+        ...calcInput,
+      });
+    } catch (err) {
+      return CalculatorFailureSchema.parse({
+        success: false,
+        ...calcInput,
+        error_type: 'runtime_error',
+        error_message: err instanceof Error ? err.message.slice(0, 50) : 'Unknown runtime error',
+      });
+    }
+  },
+  {
+    name: 'calculator',
+    description:
+      'Use this tool when an exact numerical calculation is required and precision matters.',
+    schema: CalculatorInputSchema,
+  }
+);
+
+const webFetchTool = tool(
+  async (webInput: WebFetchInput) => {
+    const startTime = Date.now();
+
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), webInput.timeout_ms);
+
+      const response = await fetch(webInput.url, {
+        method: webInput.method,
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
+      const timing_ms = Date.now() - startTime;
+
+      if (!response.ok) {
+        return WebObservationFailureSchema.parse({
+          success: false,
+          status: response.status,
+          timing_ms,
+          error: `HTTP ${response.status}: ${response.statusText}`,
+        });
+      }
+
+      const contentType = response.headers.get('content-type') || undefined;
+      const fullText = await response.text();
+      const truncated = fullText.length > webInput.max_chars;
+      const text = truncated ? fullText.slice(0, webInput.max_chars) : fullText;
+
+      return WebObservationSuccessSchema.parse({
+        success: true,
+        final_url: response.url,
+        status: response.status,
+        timing_ms,
+        content_type: contentType,
+        text,
+        truncated,
+      });
+    } catch (err) {
+      const timing_ms = Date.now() - startTime;
+      const errorMessage =
+        err instanceof Error
+          ? err.name === 'AbortError'
+            ? `Request timed out after ${webInput.timeout_ms}ms`
+            : err.message
+          : 'Unknown fetch error';
+
+      return WebObservationFailureSchema.parse({
+        success: false,
+        timing_ms,
+        error: errorMessage,
+      });
+    }
+  },
+  {
+    name: 'web_fetch_mock',
+    description:
+      'Use this tool when we need to fetch the external page content or meta data of a website',
+    schema: WebFetchInputSchema,
+  }
+);
+
+const dbQueryCandidatesTool = tool(
+  (dbInput: z.infer<typeof CandidatesInputQuerySchema>) => {
+    const mockCandidates = [
+      {
+        id: '550e8400-e29b-41d4-a716-446655440001',
+        name: 'Alice Johnson',
+        email: 'alice@example.com',
+        address: '123 Main St, NYC',
+      },
+      {
+        id: '550e8400-e29b-41d4-a716-446655440002',
+        name: 'Bob Smith',
+        email: 'bob@example.com',
+        address: '456 Oak Ave, LA',
+      },
+      {
+        id: '550e8400-e29b-41d4-a716-446655440003',
+        name: 'Carol White',
+        email: 'carol@example.com',
+        address: '789 Pine Rd, Chicago',
+      },
+    ];
+
+    try {
+      // Filter by where clause
+      const filtered = mockCandidates.filter((candidate) => {
+        const field = dbInput.where.field as keyof typeof candidate;
+        return candidate[field] === dbInput.where.value;
+      });
+
+      // No results found
+      if (filtered.length === 0) {
+        return craftDbFailureObservation({
+          table: 'candidates',
+          columns: dbInput.columns,
+          error: {
+            message: `No candidate found with ${dbInput.where.field} = ${dbInput.where.value}`,
+            type: 'not_found',
+          },
+          map: CANDIDATES_COLUMNS_TO_ZOD,
+        });
+      }
+
+      // Apply limit
+      const limited = filtered.slice(0, dbInput.limit);
+      const hasMore = filtered.length > dbInput.limit;
+
+      // Select only requested columns
+      const rows = limited.map((row) => {
+        const selected: Record<string, unknown> = {};
+        for (const col of dbInput.columns) {
+          selected[col] = row[col as keyof typeof row];
+        }
+        return selected;
+      });
+
+      return craftDbSuccessObservation({
+        table: 'candidates',
+        columns: dbInput.columns,
+        rows,
+        hasMore,
+        map: CANDIDATES_COLUMNS_TO_ZOD,
+      });
+    } catch (err) {
+      return craftDbFailureObservation({
+        table: 'candidates',
+        columns: dbInput.columns,
+        error: {
+          message: err instanceof Error ? err.message.slice(0, 50) : 'Query failed',
+          type: 'query_error',
+        },
+        map: CANDIDATES_COLUMNS_TO_ZOD,
+      });
+    }
+  },
+  {
+    name: 'db_query_candidates',
+    description: 'Query the candidates table by name, email, id, or address',
+    schema: CandidatesInputQuerySchema,
+  }
+);
+
+const dbQueryOpportunitiesTool = tool(
+  (dbInput: z.infer<typeof OpportunitiesInputQuerySchema>) => {
+    const mockOpportunities = [
+      {
+        id: '550e8400-e29b-41d4-a716-446655440010',
+        name: 'Mcdonalds',
+        position: 'Manager',
+        stage: 'onsite' as const,
+      },
+      {
+        id: '550e8400-e29b-41d4-a716-446655440011',
+        name: 'Burger King',
+        position: 'Product Manager',
+        stage: 'screen' as const,
+      },
+      {
+        id: '550e8400-e29b-41d4-a716-446655440012',
+        name: 'Taco Bell',
+        position: 'Designer',
+        stage: 'applied' as const,
+      },
+    ];
+
+    try {
+      const filtered = mockOpportunities.filter((opportunity) => {
+        const field = dbInput.where.field as keyof typeof opportunity;
+        return opportunity[field] === dbInput.where.value;
+      });
+
+      // No results found
+      if (filtered.length === 0) {
+        return craftDbFailureObservation({
+          table: 'opportunities',
+          columns: dbInput.columns,
+          error: {
+            message: `No opportunity found with ${dbInput.where.field} = ${dbInput.where.value}`,
+            type: 'not_found',
+          },
+          map: OPPORTUNITIES_COLUMNS_TO_ZOD,
+        });
+      }
+
+      const limited = filtered.slice(0, dbInput.limit);
+      const hasMore = filtered.length > dbInput.limit;
+
+      const rows = limited.map((row) => {
+        const selected: Record<string, unknown> = {};
+        for (const col of dbInput.columns) {
+          selected[col] = row[col as keyof typeof row];
+        }
+        return selected;
+      });
+
+      return craftDbSuccessObservation({
+        table: 'opportunities',
+        columns: dbInput.columns,
+        rows,
+        hasMore,
+        map: OPPORTUNITIES_COLUMNS_TO_ZOD,
+      });
+    } catch (err) {
+      return craftDbFailureObservation({
+        table: 'opportunities',
+        columns: dbInput.columns,
+        error: {
+          message: err instanceof Error ? err.message.slice(0, 50) : 'Query failed',
+          type: 'query_error',
+        },
+        map: OPPORTUNITIES_COLUMNS_TO_ZOD,
+      });
+    }
+  },
+  {
+    name: 'db_query_opportunities',
+    description: 'Query the opportunities table by name, position, id, or stage',
+    schema: OpportunitiesInputQuerySchema,
+  }
+);
+
+const TOOL_BY_NAME = {
+  calculator: calculatorTool,
+  web_fetch_mock: webFetchTool,
+  db_query_candidates: dbQueryCandidatesTool,
+  db_query_opportunities: dbQueryOpportunitiesTool,
+} as const;
 
 const CANDIDATES_COLUMNS_TO_ZOD = {
   id: z.string().uuid(),
@@ -162,7 +419,6 @@ const craftDbObservationSuccessSchema = (
 
 const craftDbObservationFailureSchema = (
   table: 'candidates' | 'opportunities',
-  columns: string[],
   _map: Record<string, z.ZodTypeAny>
 ) => {
   const c = table === 'candidates' ? CANDIDATE_COLUMN_ENUM : OPPORTUNITY_COLUMN_ENUM;
@@ -218,7 +474,7 @@ const craftDbFailureObservation = ({
     error_message: error.message,
     error_type: error.type,
   };
-  craftDbObservationFailureSchema(table, columns, map).parse(observation);
+  craftDbObservationFailureSchema(table, map).parse(observation);
   return observation;
 };
 
@@ -281,70 +537,6 @@ const WebObservationSchema = z.discriminatedUnion('success', [
   WebObservationFailureSchema,
 ]);
 
-type AgentState = {
-  attempts: number;
-  userQuery: string;
-  messages: Anthropic.MessageParam[];
-  done: boolean;
-  finalResponse?: string;
-};
-
-type ToolCallTrace = {
-  input: CalculatorInput | WebFetchInput | DBQueryInput;
-  attempt: number;
-  toolName: string;
-  observation: unknown;
-  inputValid: boolean;
-  validationError?: string;
-};
-
-type GetToolResult =
-  | {
-      type: 'tool_use';
-      blocks: Anthropic.ToolUseBlock[];
-    }
-  | {
-      type: 'text';
-      text: string;
-    };
-
-async function getToolIntent(state: AgentState): Promise<GetToolResult> {
-  const response = await anthropic.messages.create({
-    model: 'claude-sonnet-4-5',
-    max_tokens: 1024,
-    tools,
-    messages: state.messages,
-  });
-
-  const toolBlocks = response.content.filter(
-    (block: Anthropic.ContentBlock): block is Anthropic.ToolUseBlock => block.type === 'tool_use'
-  );
-
-  if (toolBlocks.length > 0) {
-    return {
-      type: 'tool_use',
-      blocks: toolBlocks,
-    };
-  }
-
-  const textContent = response.content
-    .filter((block: Anthropic.ContentBlock): block is Anthropic.TextBlock => block.type === 'text')
-    .map((block: Anthropic.TextBlock) => block.text)
-    .join('\n');
-
-  return {
-    type: 'text',
-    text: textContent,
-  };
-}
-
-type CalculatorErrorType = 'invalid_input' | 'invalid_calculation' | 'runtime_error';
-
-type CalculatorError = {
-  error_type: CalculatorErrorType;
-  error_message: string;
-};
-
 function classifyCalculatorError(
   input: CalculatorInput,
   result: number
@@ -370,367 +562,466 @@ function classifyCalculatorError(
 }
 
 type ToolType = 'calculator' | 'web_fetch_mock' | 'db_query_candidates' | 'db_query_opportunities';
-const dispatch = async (
-  toolType: ToolType,
-  input: CalculatorInput | WebFetchInput | DBQueryInput
-) => {
-  const execute: Record<ToolType, () => unknown | Promise<unknown>> = {
-    calculator: () => {
-      const calcInput = input as CalculatorInput;
-      let result: number;
 
-      try {
-        switch (calcInput.operation) {
-          case 'multiply':
-            result = calcInput.a * calcInput.b;
-            break;
-          case 'add':
-            result = calcInput.a + calcInput.b;
-            break;
-          case 'subtract':
-            result = calcInput.a - calcInput.b;
-            break;
-          case 'divide':
-            result = calcInput.a / calcInput.b;
-            break;
-          default:
-            throw new Error('Unsupported operation');
-        }
-
-        if (!Number.isFinite(result)) {
-          const { error_type, error_message } = classifyCalculatorError(calcInput, result);
-
-          return CalculatorFailureSchema.parse({
-            success: false,
-            ...calcInput,
-            error_type,
-            error_message,
-          });
-        }
-
-        return CalculatorSuccessSchema.parse({
-          success: true,
-          result,
-          ...calcInput,
-        });
-      } catch (err) {
-        return CalculatorFailureSchema.parse({
-          success: false,
-          ...calcInput,
-          error_type: 'runtime_error',
-          error_message: err instanceof Error ? err.message.slice(0, 50) : 'Unknown runtime error',
-        });
-      }
-    },
-
-    web_fetch_mock: async () => {
-      const webInput = input as WebFetchInput;
-      const startTime = Date.now();
-
-      try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), webInput.timeout_ms);
-
-        const response = await fetch(webInput.url, {
-          method: webInput.method,
-          signal: controller.signal,
-        });
-        clearTimeout(timeoutId);
-
-        const timing_ms = Date.now() - startTime;
-
-        if (!response.ok) {
-          return WebObservationFailureSchema.parse({
-            success: false,
-            status: response.status,
-            timing_ms,
-            error: `HTTP ${response.status}: ${response.statusText}`,
-          });
-        }
-
-        const contentType = response.headers.get('content-type') || undefined;
-        const fullText = await response.text();
-        const truncated = fullText.length > webInput.max_chars;
-        const text = truncated ? fullText.slice(0, webInput.max_chars) : fullText;
-
-        return WebObservationSuccessSchema.parse({
-          success: true,
-          final_url: response.url,
-          status: response.status,
-          timing_ms,
-          content_type: contentType,
-          text,
-          truncated,
-        });
-      } catch (err) {
-        const timing_ms = Date.now() - startTime;
-        const errorMessage =
-          err instanceof Error
-            ? err.name === 'AbortError'
-              ? `Request timed out after ${webInput.timeout_ms}ms`
-              : err.message
-            : 'Unknown fetch error';
-
-        return WebObservationFailureSchema.parse({
-          success: false,
-          timing_ms,
-          error: errorMessage,
-        });
-      }
-    },
-
-    db_query_candidates: () => {
-      const dbInput = input as z.infer<typeof CandidatesInputQuerySchema>;
-
-      // Mock database for candidates
-      const mockCandidates = [
-        {
-          id: '550e8400-e29b-41d4-a716-446655440001',
-          name: 'Alice Johnson',
-          email: 'alice@example.com',
-          address: '123 Main St, NYC',
-        },
-        {
-          id: '550e8400-e29b-41d4-a716-446655440002',
-          name: 'Bob Smith',
-          email: 'bob@example.com',
-          address: '456 Oak Ave, LA',
-        },
-        {
-          id: '550e8400-e29b-41d4-a716-446655440003',
-          name: 'Carol White',
-          email: 'carol@example.com',
-          address: '789 Pine Rd, Chicago',
-        },
-      ];
-
-      try {
-        // Filter by where clause
-        const filtered = mockCandidates.filter((candidate) => {
-          const field = dbInput.where.field as keyof typeof candidate;
-          return candidate[field] === dbInput.where.value;
-        });
-
-        // No results found
-        if (filtered.length === 0) {
-          return craftDbFailureObservation({
-            table: 'candidates',
-            columns: dbInput.columns,
-            error: {
-              message: `No candidate found with ${dbInput.where.field} = ${dbInput.where.value}`,
-              type: 'not_found',
-            },
-            map: CANDIDATES_COLUMNS_TO_ZOD,
-          });
-        }
-
-        // Apply limit
-        const limited = filtered.slice(0, dbInput.limit);
-        const hasMore = filtered.length > dbInput.limit;
-
-        // Select only requested columns
-        const rows = limited.map((row) => {
-          const selected: Record<string, unknown> = {};
-          for (const col of dbInput.columns) {
-            selected[col] = row[col as keyof typeof row];
-          }
-          return selected;
-        });
-
-        return craftDbSuccessObservation({
-          table: 'candidates',
-          columns: dbInput.columns,
-          rows,
-          hasMore,
-          map: CANDIDATES_COLUMNS_TO_ZOD,
-        });
-      } catch (err) {
-        return craftDbFailureObservation({
-          table: 'candidates',
-          columns: dbInput.columns,
-          error: {
-            message: err instanceof Error ? err.message.slice(0, 50) : 'Query failed',
-            type: 'query_error',
-          },
-          map: CANDIDATES_COLUMNS_TO_ZOD,
-        });
-      }
-    },
-
-    db_query_opportunities: () => {
-      const dbInput = input as z.infer<typeof OpportunitiesInputQuerySchema>;
-
-      // Mock database for opportunities
-      const mockOpportunities = [
-        {
-          id: '550e8400-e29b-41d4-a716-446655440010',
-          name: 'Mcdonalds',
-          position: 'Manager',
-          stage: 'onsite' as const,
-        },
-        {
-          id: '550e8400-e29b-41d4-a716-446655440011',
-          name: 'Burger King',
-          position: 'Product Manager',
-          stage: 'screen' as const,
-        },
-        {
-          id: '550e8400-e29b-41d4-a716-446655440012',
-          name: 'Taco Bell',
-          position: 'Designer',
-          stage: 'applied' as const,
-        },
-      ];
-
-      try {
-        // Filter by where clause
-        const filtered = mockOpportunities.filter((opportunity) => {
-          const field = dbInput.where.field as keyof typeof opportunity;
-          return opportunity[field] === dbInput.where.value;
-        });
-
-        // No results found
-        if (filtered.length === 0) {
-          return craftDbFailureObservation({
-            table: 'opportunities',
-            columns: dbInput.columns,
-            error: {
-              message: `No opportunity found with ${dbInput.where.field} = ${dbInput.where.value}`,
-              type: 'not_found',
-            },
-            map: OPPORTUNITIES_COLUMNS_TO_ZOD,
-          });
-        }
-
-        // Apply limit
-        const limited = filtered.slice(0, dbInput.limit);
-        const hasMore = filtered.length > dbInput.limit;
-
-        // Select only requested columns
-        const rows = limited.map((row) => {
-          const selected: Record<string, unknown> = {};
-          for (const col of dbInput.columns) {
-            selected[col] = row[col as keyof typeof row];
-          }
-          return selected;
-        });
-
-        return craftDbSuccessObservation({
-          table: 'opportunities',
-          columns: dbInput.columns,
-          rows,
-          hasMore,
-          map: OPPORTUNITIES_COLUMNS_TO_ZOD,
-        });
-      } catch (err) {
-        return craftDbFailureObservation({
-          table: 'opportunities',
-          columns: dbInput.columns,
-          error: {
-            message: err instanceof Error ? err.message.slice(0, 50) : 'Query failed',
-            type: 'query_error',
-          },
-          map: OPPORTUNITIES_COLUMNS_TO_ZOD,
-        });
-      }
-    },
-  };
-
-  return execute[toolType]();
+type ToolTraceEntry = {
+  step: number;
+  toolName: string;
+  toolCallId: string;
+  input: Record<string, unknown>;
+  inputValid: boolean;
+  validationError?: string;
+  observation: unknown;
+  success: boolean;
+  timestamp: number;
+  durationMs?: number;
 };
 
-const getFormattedToolOrAnswerToUserInput = async (userQuery: AgentState['userQuery']) => {
-  const state: AgentState = {
-    userQuery,
-    attempts: 0,
-    messages: [{ role: 'user', content: userQuery }],
-    done: false,
+type LLMTraceEntry = {
+  step: number;
+  decision: 'tool_use' | 'final_answer' | 'max_attempts';
+  toolsCalled?: string[];
+  timestamp: number;
+};
+
+type TraceEntry = { type: 'llm'; data: LLMTraceEntry } | { type: 'tool'; data: ToolTraceEntry };
+
+const AgentResponseSchema = z.discriminatedUnion('status', [
+  z.object({
+    status: z.literal('success'),
+    content: z.string(),
+    metadata: z.object({
+      userQuery: z.string(),
+      totalSteps: z.number(),
+      toolsUsed: z.array(z.string()),
+      startedAt: z.number(),
+      completedAt: z.number(),
+      durationMs: z.number(),
+    }),
+    trace: z.array(z.any()),
+  }),
+  z.object({
+    status: z.literal('max_attempts_reached'),
+    content: z.string(),
+    metadata: z.object({
+      userQuery: z.string(),
+      totalSteps: z.number(),
+      maxSteps: z.number(),
+      toolsUsed: z.array(z.string()),
+      startedAt: z.number(),
+      completedAt: z.number(),
+      durationMs: z.number(),
+    }),
+    trace: z.array(z.any()),
+  }),
+  z.object({
+    status: z.literal('error'),
+    content: z.string(),
+    error: z.object({
+      type: z.string(),
+      message: z.string(),
+    }),
+    metadata: z.object({
+      userQuery: z.string(),
+      totalSteps: z.number(),
+      toolsUsed: z.array(z.string()),
+      startedAt: z.number(),
+      completedAt: z.number(),
+      durationMs: z.number(),
+    }),
+    trace: z.array(z.any()),
+  }),
+]);
+
+type AgentResponse = z.infer<typeof AgentResponseSchema>;
+
+export const AgentStateSchema = Annotation.Root({
+  ...MessagesAnnotation.spec,
+  userQuery: Annotation<string>(),
+  tool_calls: Annotation<
+    Array<{ id: string; name: string; args: Record<string, unknown> }> | undefined
+  >(),
+  step: Annotation<number>(),
+  response: Annotation<string | undefined>(),
+  maxStep: Annotation<number>(),
+  trace: Annotation<TraceEntry[]>({
+    reducer: (prev: any, next: any) => [...(prev ?? []), ...next],
+    default: () => [],
+  }),
+});
+
+type AgentState = typeof AgentStateSchema.State;
+
+async function getToolIntent(state: AgentState) {
+  if (state.step >= state.maxStep) {
+    const traceEntry: TraceEntry = {
+      type: 'llm',
+      data: {
+        step: state.step,
+        decision: 'max_attempts',
+        timestamp: Date.now(),
+      },
+    };
+    return {
+      response: 'Max attempts reached without final answer',
+      trace: [traceEntry],
+    };
+  }
+
+  const modelWithTools = model.bindTools(Object.values(TOOL_BY_NAME));
+  const aiMessage = await modelWithTools.invoke(state.messages);
+
+  const toolCalls = aiMessage.tool_calls ?? [];
+  if (toolCalls.length > 0) {
+    const traceEntry: TraceEntry = {
+      type: 'llm',
+      data: {
+        step: state.step,
+        decision: 'tool_use',
+        toolsCalled: toolCalls.map((tc: any) => tc.name),
+        timestamp: Date.now(),
+      },
+    };
+    return {
+      messages: [aiMessage],
+      tool_calls: toolCalls,
+      trace: [traceEntry],
+    };
+  }
+
+  const traceEntry: TraceEntry = {
+    type: 'llm',
+    data: {
+      step: state.step,
+      decision: 'final_answer',
+      timestamp: Date.now(),
+    },
   };
-  const MAX = 3;
+  return {
+    response:
+      typeof aiMessage.content === 'string' ? aiMessage.content : JSON.stringify(aiMessage.content),
+    tool_calls: undefined,
+    trace: [traceEntry],
+  };
+}
 
-  while (state.attempts < MAX) {
-    const response = await getToolIntent(state);
-    if (response.type === 'text') {
-      return response.text;
-    }
-    state.messages.push({
-      role: 'assistant',
-      content: response.blocks,
-    });
+async function verifyAndExecuteTool(state: AgentState) {
+  const toolMessages: ToolMessage[] = [];
+  const traceEntries: TraceEntry[] = [];
 
-    const block = [...response.blocks].reverse().find((b) => b.type === 'tool_use');
-    if (!block) return 'No tool_use block found';
-    const toolName = block.name as ToolType;
-    const schema = TOOL_INPUT_SCHEMAS[toolName];
-    if (!schema) {
+  for (const toolCall of state.tool_calls ?? []) {
+    const startTime = Date.now();
+    const tool = TOOL_BY_NAME[toolCall.name as keyof typeof TOOL_BY_NAME];
+
+    if (!tool) {
       const observation = {
         success: false,
-        tool: toolName,
         error_type: 'invalid_input',
-        error_message: 'Unknown tool',
+        error_message: `Unknown tool call: ${toolCall.name}`,
       };
-
-      state.messages.push({
-        role: 'user',
-        content: [
-          {
-            type: 'tool_result',
-            tool_use_id: block.id,
-            content: JSON.stringify(observation),
-          },
-        ],
+      toolMessages.push(
+        new ToolMessage({
+          tool_call_id: toolCall.id,
+          content: JSON.stringify(observation),
+        })
+      );
+      traceEntries.push({
+        type: 'tool',
+        data: {
+          step: state.step,
+          toolName: toolCall.name,
+          toolCallId: toolCall.id,
+          input: toolCall.args,
+          inputValid: false,
+          validationError: 'Unknown tool',
+          observation,
+          success: false,
+          timestamp: startTime,
+          durationMs: Date.now() - startTime,
+        },
       });
-
-      state.attempts++;
       continue;
     }
 
-    const parsed = schema.safeParse(block.input);
+    const schema = TOOL_INPUT_SCHEMAS[toolCall.name as ToolType];
+    if (!schema) {
+      const observation = {
+        success: false,
+        error_type: 'invalid_schema',
+        error_message: `No schema for tool: ${toolCall.name}`,
+      };
+      toolMessages.push(
+        new ToolMessage({
+          tool_call_id: toolCall.id,
+          content: JSON.stringify(observation),
+        })
+      );
+      traceEntries.push({
+        type: 'tool',
+        data: {
+          step: state.step,
+          toolName: toolCall.name,
+          toolCallId: toolCall.id,
+          input: toolCall.args,
+          inputValid: false,
+          validationError: 'No schema found',
+          observation,
+          success: false,
+          timestamp: startTime,
+          durationMs: Date.now() - startTime,
+        },
+      });
+      continue;
+    }
+
+    const processedArgs = parseStringifiedJsonFields(toolCall.args);
+    const parsed = schema.safeParse(processedArgs);
 
     if (!parsed.success) {
       const observation = {
         success: false,
-        tool: toolName,
         error_type: 'invalid_input',
-        error_message: parsed.error.issues[0]?.message.slice(0, 50) ?? 'Invalid input',
+        error_message: 'Schema Validation Failed',
       };
-
-      state.messages.push({
-        role: 'user',
-        content: [
-          {
-            type: 'tool_result',
-            tool_use_id: block.id,
-            content: JSON.stringify(observation),
-          },
-        ],
+      toolMessages.push(
+        new ToolMessage({
+          tool_call_id: toolCall.id,
+          content: JSON.stringify(observation),
+        })
+      );
+      traceEntries.push({
+        type: 'tool',
+        data: {
+          step: state.step,
+          toolName: toolCall.name,
+          toolCallId: toolCall.id,
+          input: processedArgs,
+          inputValid: false,
+          validationError: JSON.stringify(parsed.error.issues),
+          observation,
+          success: false,
+          timestamp: startTime,
+          durationMs: Date.now() - startTime,
+        },
       });
-
-      state.attempts++;
       continue;
     }
-    const observation = await dispatch(
-      block.name as ToolType,
-      block.input as CalculatorInput | WebFetchInput | DBQueryInput
-    );
-    console.log('observation', observation);
 
-    // Push tool_result back to messages
-    state.messages.push({
-      role: 'user',
-      content: [
-        {
-          type: 'tool_result',
-          tool_use_id: block.id,
-          content: JSON.stringify(observation),
+    try {
+      const toolResult = await (tool as {
+        invoke: (input: Record<string, unknown>) => Promise<unknown>;
+      }).invoke(parsed.data as Record<string, unknown>);
+
+      const observation = typeof toolResult === 'string' ? JSON.parse(toolResult) : toolResult;
+      const isSuccess = observation?.success !== false;
+
+      toolMessages.push(
+        new ToolMessage({
+          tool_call_id: toolCall.id,
+          content: typeof toolResult === 'string' ? toolResult : JSON.stringify(toolResult),
+        })
+      );
+      traceEntries.push({
+        type: 'tool',
+        data: {
+          step: state.step,
+          toolName: toolCall.name,
+          toolCallId: toolCall.id,
+          input: parsed.data as Record<string, unknown>,
+          inputValid: true,
+          observation,
+          success: isSuccess,
+          timestamp: startTime,
+          durationMs: Date.now() - startTime,
         },
-      ],
-    });
-
-    state.attempts++;
+      });
+    } catch (err) {
+      const observation = {
+        success: false,
+        error_type: 'runtime_error',
+        error_message: err instanceof Error ? err.message : 'Tool execution failed',
+      };
+      toolMessages.push(
+        new ToolMessage({
+          tool_call_id: toolCall.id,
+          content: JSON.stringify(observation),
+        })
+      );
+      traceEntries.push({
+        type: 'tool',
+        data: {
+          step: state.step,
+          toolName: toolCall.name,
+          toolCallId: toolCall.id,
+          input: parsed.data as Record<string, unknown>,
+          inputValid: true,
+          observation,
+          success: false,
+          timestamp: startTime,
+          durationMs: Date.now() - startTime,
+        },
+      });
+    }
   }
 
-  return 'Max attempts reached';
+  return {
+    messages: toolMessages,
+    tool_calls: undefined,
+    step: state.step + 1,
+    trace: traceEntries,
+  };
+}
+function routeAfterClassification(state: AgentState) {
+  if (state.response) return END;
+  if (state.step >= state.maxStep) return END;
+  if (state.tool_calls?.length) return 'verifyAndExecuteToolIntent';
+  return END;
+}
+
+type CalculatorErrorType = 'invalid_input' | 'invalid_calculation' | 'runtime_error';
+
+type CalculatorError = {
+  error_type: CalculatorErrorType;
+  error_message: string;
+};
+
+/**
+ * Recursively parse any string values that look like JSON objects/arrays.
+ * LLMs sometimes send nested objects as stringified JSON.
+ */
+const parseStringifiedJsonFields = (obj: Record<string, unknown>): Record<string, unknown> => {
+  const result: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(obj)) {
+    if (typeof value === 'string' && (value.startsWith('{') || value.startsWith('['))) {
+      try {
+        result[key] = JSON.parse(value);
+      } catch {
+        result[key] = value;
+      }
+    } else if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+      result[key] = parseStringifiedJsonFields(value as Record<string, unknown>);
+    } else {
+      result[key] = value;
+    }
+  }
+
+  return result;
+};
+
+const getFormattedToolOrAnswerToUserInput = async (userQuery: string): Promise<AgentResponse> => {
+  const startedAt = Date.now();
+  const maxStep = 5;
+
+  const initialState = {
+    userQuery,
+    messages: [new HumanMessage(userQuery)],
+    step: 1,
+    maxStep,
+    trace: [] as TraceEntry[],
+  };
+
+  const workflow = new StateGraph(AgentStateSchema)
+    .addNode('classifyTool', getToolIntent)
+    .addNode('verifyAndExecuteToolIntent', verifyAndExecuteTool)
+    .addEdge(START, 'classifyTool')
+    .addConditionalEdges('classifyTool', routeAfterClassification)
+    .addEdge('verifyAndExecuteToolIntent', 'classifyTool');
+
+  const app = workflow.compile();
+
+  try {
+    const result = await app.invoke(initialState);
+    const completedAt = Date.now();
+
+    // Extract unique tools used from trace
+    const toolsUsed = Array.from(
+      new Set(
+        result.trace
+          .filter((entry: TraceEntry) => entry.type === 'tool')
+          .map(
+            (entry: TraceEntry) => (entry as { type: 'tool'; data: ToolTraceEntry }).data.toolName
+          )
+      )
+    );
+
+    const hitMaxAttempts = result.trace.some(
+      (entry: TraceEntry) => entry.type === 'llm' && entry.data.decision === 'max_attempts'
+    );
+
+    if (hitMaxAttempts) {
+      return AgentResponseSchema.parse({
+        status: 'max_attempts_reached',
+        content: result.response ?? 'Max attempts reached without final answer',
+        metadata: {
+          userQuery,
+          totalSteps: result.step,
+          maxSteps: maxStep,
+          toolsUsed,
+          startedAt,
+          completedAt,
+          durationMs: completedAt - startedAt,
+        },
+        trace: result.trace,
+      });
+    }
+
+    return AgentResponseSchema.parse({
+      status: 'success',
+      content: result.response ?? '',
+      metadata: {
+        userQuery,
+        totalSteps: result.step,
+        toolsUsed,
+        startedAt,
+        completedAt,
+        durationMs: completedAt - startedAt,
+      },
+      trace: result.trace,
+    });
+  } catch (err) {
+    const completedAt = Date.now();
+
+    return AgentResponseSchema.parse({
+      status: 'error',
+      content: 'An error occurred while processing your request',
+      error: {
+        type: err instanceof Error ? err.name : 'UnknownError',
+        message: err instanceof Error ? err.message : 'Unknown error',
+      },
+      metadata: {
+        userQuery,
+        totalSteps: 0,
+        toolsUsed: [],
+        startedAt,
+        completedAt,
+        durationMs: completedAt - startedAt,
+      },
+      trace: [],
+    });
+  }
+};
+
+// Helper to format trace for display
+const formatTrace = (trace: TraceEntry[]): string => {
+  return trace
+    .map((entry, i) => {
+      if (entry.type === 'llm') {
+        const d = entry.data;
+        let line = `[${i + 1}] LLM (step ${d.step}): ${d.decision}`;
+        if (d.toolsCalled?.length) {
+          line += ` → tools: [${d.toolsCalled.join(', ')}]`;
+        }
+        return line;
+      } else {
+        const d = entry.data;
+        const status = d.success ? '✓' : '✗';
+        let line = `[${i + 1}] TOOL (step ${d.step}): ${d.toolName} ${status}`;
+        if (d.durationMs) line += ` (${d.durationMs}ms)`;
+        if (!d.inputValid) line += ` | validation error: ${d.validationError}`;
+        return line;
+      }
+    })
+    .join('\n');
 };
 
 // Main execution
@@ -740,19 +1031,36 @@ async function main() {
   const testInputs = [
     'Hello, how are you?',
     'What is 5 times 5?',
-    'what is 5 times a',
+    'What is 5 times a',
     'what is 5 divided by 0',
-    'Fetch the content of https://example.com',
-    'Fetch https://google.com',
     'Find the candidate named Alice Johnson',
     'Look up Sarah Connor in candidates',
   ];
 
   for (const input of testInputs) {
+    console.log(`═══════════════════════════════════════════════════`);
     console.log(`Input: "${input}"`);
-    const result = await getFormattedToolOrAnswerToUserInput(input);
-    console.log('Result:', JSON.stringify(result, null, 2));
-    console.log('---\n');
+    console.log(`───────────────────────────────────────────────────`);
+
+    const response = await getFormattedToolOrAnswerToUserInput(input);
+
+    console.log(`\nStatus: ${response.status}`);
+    console.log(`Duration: ${response.metadata.durationMs}ms`);
+    console.log(`Steps: ${response.metadata.totalSteps}`);
+    if (response.metadata.toolsUsed.length > 0) {
+      console.log(`Tools used: [${response.metadata.toolsUsed.join(', ')}]`);
+    }
+
+    console.log('\nTrace:');
+    console.log(formatTrace(response.trace as TraceEntry[]));
+
+    console.log(`\nContent:\n${response.content}`);
+
+    if (response.status === 'error') {
+      console.log(`\nError: ${response.error.type} - ${response.error.message}`);
+    }
+
+    console.log('');
   }
 }
 

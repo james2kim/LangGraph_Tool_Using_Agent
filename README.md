@@ -68,6 +68,7 @@ A single-loop agentic system that uses Claude to intelligently select and execut
 ### 1. Tool Definitions
 
 Tools are defined with Zod schemas that serve dual purposes:
+
 - **JSON Schema generation** for the LLM (via `z.toJSONSchema()`)
 - **Runtime validation** before execution (via `safeParse()`)
 
@@ -82,22 +83,22 @@ const TOOL_INPUT_SCHEMAS = {
 
 ### 2. Available Tools
 
-| Tool | Description | Input |
-|------|-------------|-------|
-| `calculator` | Arithmetic operations | `{ a, b, operation }` |
-| `web_fetch_mock` | HTTP GET requests | `{ url, timeout_ms, max_chars }` |
-| `db_query_candidates` | Query candidates table | `{ table, columns, where, limit }` |
+| Tool                     | Description               | Input                              |
+| ------------------------ | ------------------------- | ---------------------------------- |
+| `calculator`             | Arithmetic operations     | `{ a, b, operation }`              |
+| `web_fetch_mock`         | HTTP GET requests         | `{ url, timeout_ms, max_chars }`   |
+| `db_query_candidates`    | Query candidates table    | `{ table, columns, where, limit }` |
 | `db_query_opportunities` | Query opportunities table | `{ table, columns, where, limit }` |
 
 ### 3. Agent State
 
 ```typescript
 type AgentState = {
-  attempts: number;              // Current iteration count
-  userQuery: string;             // Original user input
-  messages: Anthropic.MessageParam[];  // Conversation history
-  done: boolean;                 // Loop termination flag
-  finalResponse?: string;        // Final text response
+  attempts: number; // Current iteration count
+  userQuery: string; // Original user input
+  messages: Anthropic.MessageParam[]; // Conversation history
+  done: boolean; // Loop termination flag
+  finalResponse?: string; // Final text response
 };
 ```
 
@@ -146,12 +147,12 @@ LLM returns tool_use
 
 ## Error Handling
 
-| Error Type | Handled By | Response |
-|------------|------------|----------|
-| Unknown tool | Agent loop | `{ success: false, error_type: 'invalid_input', error_message: 'Unknown tool' }` |
-| Invalid input | Zod validation | `{ success: false, error_type: 'invalid_input', error_message: '...' }` |
-| Execution error | Tool executor | Tool-specific failure schema |
-| No results | Tool executor | `{ success: false, error_type: 'not_found', error_message: '...' }` |
+| Error Type      | Handled By     | Response                                                                         |
+| --------------- | -------------- | -------------------------------------------------------------------------------- |
+| Unknown tool    | Agent loop     | `{ success: false, error_type: 'invalid_input', error_message: 'Unknown tool' }` |
+| Invalid input   | Zod validation | `{ success: false, error_type: 'invalid_input', error_message: '...' }`          |
+| Execution error | Tool executor  | Tool-specific failure schema                                                     |
+| No results      | Tool executor  | `{ success: false, error_type: 'not_found', error_message: '...' }`              |
 
 ## Running the Agent
 
@@ -174,20 +175,20 @@ npm run dev
 
 ```typescript
 // Calculator
-'What is 5 times 5?'
-'Calculate 100 divided by 4'
+'What is 5 times 5?';
+'Calculate 100 divided by 4';
 
 // Web Fetch
-'Fetch the content of https://example.com'
-'What is on https://httpbin.org/json?'
+'Fetch the content of https://example.com';
+'What is on https://httpbin.org/json?';
 
 // Database - Candidates
-'Find the candidate named Alice Johnson'
-'Look up bob@example.com in candidates'
+'Find the candidate named Alice Johnson';
+'Look up bob@example.com in candidates';
 
 // Database - Opportunities
-'What opportunities are in the onsite stage?'
-'Find the Mcdonalds opportunity'
+'What opportunities are in the onsite stage?';
+'Find the Mcdonalds opportunity';
 ```
 
 ## Project Structure
