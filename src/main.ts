@@ -532,11 +532,6 @@ const WebObservationFailureSchema = z.object({
   error: z.string(),
 });
 
-const WebObservationSchema = z.discriminatedUnion('success', [
-  WebObservationSuccessSchema,
-  WebObservationFailureSchema,
-]);
-
 function classifyCalculatorError(
   input: CalculatorInput,
   result: number
@@ -635,7 +630,7 @@ const AgentResponseSchema = z.discriminatedUnion('status', [
 type AgentResponse = z.infer<typeof AgentResponseSchema>;
 
 export const AgentStateSchema = Annotation.Root({
-  ...MessagesAnnotation.spec,
+  messages: MessagesAnnotation,
   userQuery: Annotation<string>(),
   tool_calls: Annotation<
     Array<{ id: string; name: string; args: Record<string, unknown> }> | undefined
