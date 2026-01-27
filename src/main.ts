@@ -630,7 +630,7 @@ const AgentResponseSchema = z.discriminatedUnion('status', [
 type AgentResponse = z.infer<typeof AgentResponseSchema>;
 
 export const AgentStateSchema = Annotation.Root({
-  messages: MessagesAnnotation,
+  ...MessagesAnnotation.spec,
   userQuery: Annotation<string>(),
   tool_calls: Annotation<
     Array<{ id: string; name: string; args: Record<string, unknown> }> | undefined
