@@ -9,6 +9,7 @@
 
 # practice drills (learning exercises)
 src/practice-drill-*.ts
+src/practice.ts
 
 # misc
 .DS_Store

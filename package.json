@@ -8,7 +8,9 @@
     "start": "tsx src/main.ts",
     "dev": "tsx watch src/main.ts",
     "lint": "eslint src/",
-    "format": "prettier --write src/"
+    "format": "prettier --write src/",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.71.2",
@@ -26,6 +28,7 @@
     "prettier": "^3.8.0",
     "tsx": "^4.21.0",
     "typescript": "^5",
-    "typescript-eslint": "^8"
+    "typescript-eslint": "^8",
+    "vitest": "^4.0.18"
   }
 }
