@@ -175,6 +175,7 @@ const webFetchTool = tool(
           success: false,
           status: response.status,
           timing_ms,
+          error_type: 'http_error',
           error: `HTTP ${response.status}: ${response.statusText}`,
         });
       }
@@ -205,7 +206,8 @@ const webFetchTool = tool(
       return WebObservationFailureSchema.parse({
         success: false,
         timing_ms,
-        error: errorMessage,
+        error_message: errorMessage,
+        error_type: 'runtime_error',
       });
     }
   },
@@ -286,7 +288,7 @@ const dbQueryCandidatesTool = tool(
         columns: dbInput.columns,
         error: {
           message: err instanceof Error ? err.message.slice(0, 50) : 'Query failed',
-          type: 'query_error',
+          type: 'runtime_error',
         },
         map: CANDIDATES_COLUMNS_TO_ZOD,
       });
@@ -365,7 +367,7 @@ const dbQueryOpportunitiesTool = tool(
         columns: dbInput.columns,
         error: {
           message: err instanceof Error ? err.message.slice(0, 50) : 'Query failed',
-          type: 'query_error',
+          type: 'runtime_error',
         },
         map: OPPORTUNITIES_COLUMNS_TO_ZOD,
       });
@@ -427,7 +429,7 @@ const craftDbObservationFailureSchema = (
     table: z.literal(table),
     columns: z.array(c).min(1),
     error_message: z.string().min(5).max(50),
-    error_type: z.string().min(1),
+    error_type: z.enum(['invalid_input', 'invalid_schema', 'runtime_error', 'not_found']),
   });
 };
 
@@ -501,19 +503,14 @@ const CalculatorSuccessSchema = z.object({
 
 const CalculatorFailureSchema = z.object({
   success: z.literal(false),
-  a: z.number(),
-  b: z.number(),
+  a: z.number().optional(),
+  b: z.number().optional(),
   operation: z.enum(['multiply', 'add', 'subtract', 'divide']),
-  error_message: z.string().min(5).max(50),
-  error_type: z.enum(['invalid_input', 'invalid_calculation', 'runtime_error']),
+  error_message: z.string().min(5).max(100),
+  error_type: z.enum(['invalid_input', 'invalid_calculation', 'runtime_error', 'invalid_schema']),
 });
 
 type CalculatorFailure = z.infer<typeof CalculatorFailureSchema>;
-
-const CalculatorObservationSchema = z.discriminatedUnion('success', [
-  CalculatorSuccessSchema,
-  CalculatorFailureSchema,
-]);
 
 const WebObservationSuccessSchema = z.object({
   success: z.literal(true),
@@ -529,7 +526,8 @@ const WebObservationFailureSchema = z.object({
   success: z.literal(false),
   status: z.number().int().min(400).max(599).optional(),
   timing_ms: z.number().int().nonnegative(),
-  error: z.string(),
+  error_message: z.string().min(5).max(100),
+  error_type: z.enum(['invalid_input', 'http_error', 'runtime_error', 'invalid_schema']),
 });
 
 function classifyCalculatorError(
@@ -905,7 +903,7 @@ const parseStringifiedJsonFields = (obj: Record<string, unknown>): Record<string
 
 const getFormattedToolOrAnswerToUserInput = async (userQuery: string): Promise<AgentResponse> => {
   const startedAt = Date.now();
-  const maxStep = 5;
+  const maxStep = 3;
 
   const initialState = {
     userQuery,
