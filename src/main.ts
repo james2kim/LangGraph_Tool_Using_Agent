@@ -656,7 +656,7 @@ export const AgentStateSchema = new StateSchema({
     z.array(z.any()).default(() => []),
     {
       inputSchema: z.array(z.any()),
-      reducer: (prev, next) => [...prev, ...next],
+      reducer: (prev: any, next: any) => [...prev, ...next],
     }
   ),
 });
@@ -719,7 +719,6 @@ export const getToolIntent = async (state: AgentState) => {
 export const verifyAndExecuteTool = async (state: AgentState) => {
   const toolMessages: ToolMessage[] = [];
   const traceEntries: TraceEntry[] = [];
-  console.log(state);
   for (const toolCall of state.tool_calls ?? []) {
     const startTime = Date.now();
     const tool = TOOL_BY_NAME[toolCall.name as keyof typeof TOOL_BY_NAME];
@@ -1041,12 +1040,12 @@ async function main() {
   console.log('Running agent loop...\n');
 
   const testInputs = [
-    // 'Hello, how are you?',
+    'Hello, how are you?',
     'What is 5 times 5?',
-    // 'What is 5 times a',
-    // 'what is 5 divided by 0',
-    // 'Find the candidate named Alice Johnson',
-    // 'Look up Sarah Connor in candidates',
+    'What is 5 times a',
+    'what is 5 divided by 0',
+    'Find the candidate named Alice Johnson',
+    'Look up Sarah Connor in candidates',
   ];
 
   for (const input of testInputs) {
